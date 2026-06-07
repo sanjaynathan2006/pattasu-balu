@@ -18,6 +18,17 @@ const {
 } = require('@discordjs/voice');
 
 const { spawn } = require('child_process');
+const http = require('http');
+
+// ============================================================
+// KEEP-ALIVE SERVER (for UptimeRobot pings)
+// ============================================================
+http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('Bot is alive!');
+}).listen(process.env.PORT || 3000, () => {
+  console.log('Keep-alive server running');
+});
 
 const client = new Client({
   intents: [
@@ -33,7 +44,7 @@ client.once('ready', () => {
 });
 
 // ============================================================
-// BUTTONS — shows current loop mode + autoplay state
+// BUTTONS
 // ============================================================
 function getButtons(loopMode, autoplay) {
   const loopLabel =
@@ -54,13 +65,10 @@ function getButtons(loopMode, autoplay) {
 
 // ============================================================
 // LANGUAGE DETECTION
-// Checks Unicode script ranges first (most reliable),
-// then falls back to keywords in the title string.
 // ============================================================
 function detectLanguage(title) {
   if (!title) return null;
 
-  // Unicode script ranges — works when title has native-script characters
   if (/[\u0B80-\u0BFF]/.test(title)) return 'Tamil';
   if (/[\u0900-\u097F]/.test(title)) return 'Hindi';
   if (/[\u0C00-\u0C7F]/.test(title)) return 'Telugu';
@@ -69,8 +77,6 @@ function detectLanguage(title) {
   if (/[\u0A00-\u0A7F]/.test(title)) return 'Punjabi';
   if (/[\u0980-\u09FF]/.test(title)) return 'Bengali';
 
-  // Keyword scan for transliterated / English-script titles
-  // e.g. "Naanga Naalu Peru | Tamil Song | Think Indie"
   const lower = title.toLowerCase();
   if (/\btamil\b/.test(lower))              return 'Tamil';
   if (/\bhindi\b|\bbollywood\b/.test(lower)) return 'Hindi';
@@ -80,34 +86,20 @@ function detectLanguage(title) {
   if (/\bpunjabi\b/.test(lower))            return 'Punjabi';
   if (/\bbengali\b/.test(lower))            return 'Bengali';
 
-  return null; // English or unknown — no language filter applied
+  return null;
 }
 
-// Returns true if an entry title clearly belongs to a DIFFERENT language.
-// Used to drop cross-language songs from Radio results and fallback searches.
-// null wantedLang = English/unknown → reject anything detected as a specific language
 function isDifferentLanguage(entryTitle, wantedLang) {
   const detected = detectLanguage(entryTitle);
-
-  if (!wantedLang) {
-    // Source is English (or undetected) — reject if the entry is clearly
-    // Tamil, Hindi, Telugu, etc.
-    return detected !== null;
-  }
-
-  if (!detected) return false; // entry language unknown → don't reject
+  if (!wantedLang) return detected !== null;
+  if (!detected) return false;
   return detected !== wantedLang;
 }
 
 // ============================================================
 // AUTOPLAY HELPER
-// Primary:  YouTube Radio mix (list=RD{videoId}) — YouTube's
-//           own "related songs" algorithm, best quality results
-// Fallback: yt-dlp text search anchored by artist + language
 // ============================================================
-
 function pickFromEntries(entries, lastSong, playedUrls, language) {
-  // Core words of current song to reject same-song variants
   const coreSongName = lastSong.title
     .replace(/\(.*?\)|\[.*?\]/g, '')
     .replace(/\|.*/g, '')
@@ -123,11 +115,8 @@ function pickFromEntries(entries, lastSong, playedUrls, language) {
     const entryUrl = `https://www.youtube.com/watch?v=${e.id}`;
     if (lastSong.url.includes(e.id)) return false;
     if (playedUrls && playedUrls.has(entryUrl)) return false;
-
-    // 🆕 Reject if the entry is clearly a different language
     if (isDifferentLanguage(e.title || '', language)) return false;
 
-    // Reject if 50%+ of core song words appear in result title (same song variant)
     const entryTitle = (e.title || '').toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '');
     const matchCount = coreWords.filter(w => entryTitle.includes(w)).length;
     return matchCount < Math.ceil(coreWords.length * 0.5);
@@ -135,7 +124,6 @@ function pickFromEntries(entries, lastSong, playedUrls, language) {
 }
 
 async function fetchRelatedSong(lastSong, playedUrls, language) {
-  // ── Step 1: YouTube Radio mix — uses YouTube's own recommendation engine
   const videoIdMatch = lastSong.url.match(/[?&]v=([^&]+)/);
   const videoId = videoIdMatch ? videoIdMatch[1] : null;
 
@@ -147,8 +135,8 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
       const proc = spawn('yt-dlp', [
         '--flat-playlist',
         '--dump-single-json',
-        '--playlist-start', '2',   // index 1 = same song, skip it
-        '--playlist-end', '20',    // fetch more so language filter has options
+        '--playlist-start', '2',
+        '--playlist-end', '20',
         radioUrl
       ]);
 
@@ -158,7 +146,6 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
         try {
           const json = JSON.parse(output);
           const entries = json.entries || [];
-          // Pass language so cross-language entries are skipped
           const pick = pickFromEntries(entries, lastSong, playedUrls, language);
           resolve(pick ? {
             title: pick.title || 'Unknown',
@@ -177,9 +164,7 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
     }
   }
 
-  // ── Step 2: Fallback search — artist + language anchored query
   const rawTitle = lastSong.title;
-
   let artist = null;
   const dashFormat = rawTitle.match(/^(.+?)\s+[-–]\s+/);
   if (dashFormat) {
@@ -189,8 +174,6 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
     if (handleMatch) artist = handleMatch[1];
   }
 
-  // 🆕 Always append language to the fallback query so results stay on-language
-  //    e.g. "SaiAbhyankkar Tamil songs" or "Tamil songs hits"
   const langTag = language ? ` ${language}` : '';
   const searchQuery = artist
     ? `${artist}${langTag} songs`
@@ -232,23 +215,19 @@ async function playNext(guildId) {
   const data = queues.get(guildId);
   if (!data) return;
 
-  // Loop: SONG mode — re-add current to front
   if (data.loopMode === 1 && data.current) {
     data.queue.unshift(data.current);
   }
 
   let song = data.queue.shift();
 
-  // Queue is empty
   if (!song) {
-    // Loop: QUEUE mode — replay full history
     if (data.loopMode === 2 && data.history.length) {
       data.queue = [...data.history];
       data.history = [];
       return playNext(guildId);
     }
 
-    // Autoplay mode — fetch a related song automatically
     if (data.autoplay && data.current) {
       data.textChannel.send('🔎 Queue empty — fetching autoplay suggestion...');
       const related = await fetchRelatedSong(data.current, data.playedUrls, data.language);
@@ -258,7 +237,6 @@ async function playNext(guildId) {
       }
     }
 
-    // Still nothing — disconnect
     if (!song) {
       data.textChannel.send('📭 Queue finished. Disconnecting.');
       data.connection.destroy();
@@ -271,17 +249,11 @@ async function playNext(guildId) {
   data.history.push(song);
   if (data.history.length > 50) data.history.shift();
 
-  // 🆕 Detect language from song title and persist it on the queue.
-  // Only update if a language is actually detected — so if a language-tagged
-  // song (e.g. "Tamil") was played first and the next has no tag, we keep
-  // the known language rather than resetting to null.
   const detectedLang = detectLanguage(song.title);
   if (detectedLang) data.language = detectedLang;
 
-  // Track played URLs so autoplay never repeats them
   data.playedUrls.add(song.url);
   if (data.playedUrls.size > 100) {
-    // trim oldest entries to keep set lean
     const first = data.playedUrls.values().next().value;
     data.playedUrls.delete(first);
   }
@@ -322,281 +294,265 @@ client.on('interactionCreate', async (interaction) => {
   const guildId = interaction.guild.id;
 
   try {
-  // ==========================
-  // BUTTONS
-  // ==========================
-  if (interaction.isButton()) {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply({ content: '❌ Nothing playing', ephemeral: true });
 
-    if (interaction.customId === 'pause') {
-      data.player.pause();
-      return interaction.reply({ content: '⏸ Paused', ephemeral: true });
-    }
+    // ==========================
+    // BUTTONS
+    // ==========================
+    if (interaction.isButton()) {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply({ content: '❌ Nothing playing', ephemeral: true });
 
-    if (interaction.customId === 'resume') {
-      data.player.unpause();
-      return interaction.reply({ content: '▶️ Resumed', ephemeral: true });
-    }
+      if (interaction.customId === 'pause') {
+        data.player.pause();
+        return interaction.reply({ content: '⏸ Paused', ephemeral: true });
+      }
 
-    if (interaction.customId === 'skip') {
-      data.player.stop();
-      return interaction.reply({ content: '⏭ Skipped', ephemeral: true });
-    }
+      if (interaction.customId === 'resume') {
+        data.player.unpause();
+        return interaction.reply({ content: '▶️ Resumed', ephemeral: true });
+      }
 
-    if (interaction.customId === 'loop') {
-      data.loopMode = (data.loopMode + 1) % 3;
-      const modes = ['OFF', 'SONG', 'QUEUE'];
-      return interaction.reply({ content: `🔁 Loop: ${modes[data.loopMode]}`, ephemeral: true });
-    }
+      if (interaction.customId === 'skip') {
+        data.player.stop();
+        return interaction.reply({ content: '⏭ Skipped', ephemeral: true });
+      }
 
-    // 🆕 AUTOPLAY BUTTON TOGGLE
-    if (interaction.customId === 'autoplay') {
-      data.autoplay = !data.autoplay;
-      return interaction.reply({
-        content: `🎵 AutoPlay is now **${data.autoplay ? 'ON ✅' : 'OFF ❎'}**`,
-        ephemeral: true
-      });
-    }
-  }
+      if (interaction.customId === 'loop') {
+        data.loopMode = (data.loopMode + 1) % 3;
+        const modes = ['OFF', 'SONG', 'QUEUE'];
+        return interaction.reply({ content: `🔁 Loop: ${modes[data.loopMode]}`, ephemeral: true });
+      }
 
-  if (!interaction.isChatInputCommand()) return;
-
-  // ==========================
-  // /autoplay COMMAND
-  // ==========================
-  if (interaction.commandName === 'autoplay') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing is playing right now');
-
-    data.autoplay = !data.autoplay;
-    return interaction.reply(
-      `🎵 AutoPlay is now **${data.autoplay ? 'ON ✅ — I will keep playing related songs when the queue ends' : 'OFF ❎'}**`
-    );
-  }
-
-  // ==========================
-  // /playnow COMMAND
-  // ==========================
-  if (interaction.commandName === 'playnow') {
-    await interaction.deferReply();
-
-    const data = queues.get(guildId);
-    if (!data) return interaction.editReply('❌ Nothing is playing');
-
-    const input = interaction.options.getString('query');
-    let selectedSong = null;
-
-    // If number → pick from queue by index
-    if (!isNaN(input)) {
-      const index = parseInt(input) - 1;
-      if (index >= 0 && index < data.queue.length) {
-        selectedSong = data.queue.splice(index, 1)[0];
+      if (interaction.customId === 'autoplay') {
+        data.autoplay = !data.autoplay;
+        return interaction.reply({
+          content: `🎵 AutoPlay is now **${data.autoplay ? 'ON ✅' : 'OFF ❎'}**`,
+          ephemeral: true
+        });
       }
     }
 
-    // Otherwise search yt-dlp
-    if (!selectedSong) {
-      const search = spawn('yt-dlp', [`ytsearch1:${input}`, '--dump-single-json']);
-      let output = '';
-      search.stdout.on('data', chunk => output += chunk);
-      await new Promise(resolve => search.on('close', resolve));
+    if (!interaction.isChatInputCommand()) return;
+
+    // ==========================
+    // /autoplay COMMAND
+    // ==========================
+    if (interaction.commandName === 'autoplay') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing is playing right now');
+
+      data.autoplay = !data.autoplay;
+      return interaction.reply(
+        `🎵 AutoPlay is now **${data.autoplay ? 'ON ✅ — I will keep playing related songs when the queue ends' : 'OFF ❎'}**`
+      );
+    }
+
+    // ==========================
+    // /playnow COMMAND
+    // ==========================
+    if (interaction.commandName === 'playnow') {
+      await interaction.deferReply();
+
+      const data = queues.get(guildId);
+      if (!data) return interaction.editReply('❌ Nothing is playing');
+
+      const input = interaction.options.getString('query');
+      let selectedSong = null;
+
+      if (!isNaN(input)) {
+        const index = parseInt(input) - 1;
+        if (index >= 0 && index < data.queue.length) {
+          selectedSong = data.queue.splice(index, 1)[0];
+        }
+      }
+
+      if (!selectedSong) {
+        const search = spawn('yt-dlp', [`ytsearch1:${input}`, '--dump-single-json']);
+        let output = '';
+        search.stdout.on('data', chunk => output += chunk);
+        await new Promise(resolve => search.on('close', resolve));
+
+        try {
+          const json = JSON.parse(output);
+          selectedSong = { title: json.title, url: json.webpage_url };
+        } catch {
+          return interaction.editReply('❌ Song not found');
+        }
+      }
+
+      if (data.current) data.queue.unshift(data.current);
+      data.queue.unshift(selectedSong);
+      data.player.stop();
+
+      return interaction.editReply(`🎶 Now playing: **${selectedSong.title}**`);
+    }
+
+    // ==========================
+    // /play COMMAND
+    // ==========================
+    if (interaction.commandName === 'play') {
+      await interaction.deferReply();
+
+      const channel = interaction.member.voice.channel;
+      if (!channel) return interaction.editReply('❌ Join a voice channel first');
+
+      const query = interaction.options.getString('song');
 
       try {
-        const json = JSON.parse(output);
-        selectedSong = { title: json.title, url: json.webpage_url };
-      } catch {
-        return interaction.editReply('❌ Song not found');
-      }
-    }
+        let songs = [];
+        const isPlaylist = query.includes('list=');
 
-    // Re-queue current song and force-play selected
-    if (data.current) data.queue.unshift(data.current);
-    data.queue.unshift(selectedSong);
-    data.player.stop();
+        if (isPlaylist) {
+          const proc = spawn('yt-dlp', ['--flat-playlist', '--dump-single-json', query]);
+          let raw = '';
+          proc.stdout.on('data', chunk => raw += chunk);
+          proc.on('close', () => {
+            try {
+              const json = JSON.parse(raw);
+              if (!json.entries?.length) return interaction.editReply('❌ Could not load playlist');
+              songs = json.entries.slice(0, 100).map(v => ({
+                title: v.title || 'Unknown',
+                url: `https://www.youtube.com/watch?v=${v.id}`
+              }));
+              addToQueue();
+            } catch (err) {
+              console.error(err);
+              interaction.editReply('❌ Playlist parsing failed');
+            }
+          });
+          return;
+        }
 
-    return interaction.editReply(`🎶 Now playing: **${selectedSong.title}**`);
-  }
-
-  // ==========================
-  // /play COMMAND
-  // ==========================
-  if (interaction.commandName === 'play') {
-    await interaction.deferReply();
-
-    const channel = interaction.member.voice.channel;
-    if (!channel) return interaction.editReply('❌ Join a voice channel first');
-
-    const query = interaction.options.getString('song');
-
-    try {
-      let songs = [];
-      const isPlaylist = query.includes('list=');
-
-      if (isPlaylist) {
-        const proc = spawn('yt-dlp', ['--flat-playlist', '--dump-single-json', query]);
-        let raw = '';
-        proc.stdout.on('data', chunk => raw += chunk);
-        proc.on('close', () => {
+        const search = spawn('yt-dlp', [`ytsearch1:${query}`, '--dump-single-json']);
+        let output = '';
+        search.stdout.on('data', chunk => output += chunk);
+        search.on('close', () => {
           try {
-            const json = JSON.parse(raw);
-            if (!json.entries?.length) return interaction.editReply('❌ Could not load playlist');
-            songs = json.entries.slice(0, 100).map(v => ({
-              title: v.title || 'Unknown',
-              url: `https://www.youtube.com/watch?v=${v.id}`
-            }));
+            const json = JSON.parse(output);
+            songs.push({ title: json.title, url: json.webpage_url });
             addToQueue();
           } catch (err) {
             console.error(err);
-            interaction.editReply('❌ Playlist parsing failed');
+            interaction.editReply('❌ Failed to find song');
           }
         });
-        return;
-      }
 
-      // Single song / search
-      const search = spawn('yt-dlp', [`ytsearch1:${query}`, '--dump-single-json']);
-      let output = '';
-      search.stdout.on('data', chunk => output += chunk);
-      search.on('close', () => {
-        try {
-          const json = JSON.parse(output);
-          songs.push({ title: json.title, url: json.webpage_url });
-          addToQueue();
-        } catch (err) {
-          console.error(err);
-          interaction.editReply('❌ Failed to find song');
-        }
-      });
+        function addToQueue() {
+          let data = queues.get(guildId);
 
-      function addToQueue() {
-        let data = queues.get(guildId);
+          if (!data) {
+            const connection = joinVoiceChannel({
+              channelId: channel.id,
+              guildId: channel.guild.id,
+              adapterCreator: channel.guild.voiceAdapterCreator
+            });
 
-        if (!data) {
-          const connection = joinVoiceChannel({
-            channelId: channel.id,
-            guildId: channel.guild.id,
-            adapterCreator: channel.guild.voiceAdapterCreator
-          });
+            const player = createAudioPlayer({
+              behaviors: { noSubscriber: NoSubscriberBehavior.Play }
+            });
 
-          const player = createAudioPlayer({
-            behaviors: { noSubscriber: NoSubscriberBehavior.Play }
-          });
+            connection.subscribe(player);
 
-          connection.subscribe(player);
+            data = {
+              connection,
+              player,
+              queue: [],
+              history: [],
+              current: null,
+              loopMode: 0,
+              autoplay: false,
+              language: null,
+              playedUrls: new Set(),
+              textChannel: interaction.channel
+            };
 
-          data = {
-            connection,
-            player,
-            queue: [],
-            history: [],
-            current: null,
-            loopMode: 0,
-            autoplay: false,
-            language: null,          // 🆕 detected language of current session
-            playedUrls: new Set(),
-            textChannel: interaction.channel
-          };
+            queues.set(guildId, data);
 
-          queues.set(guildId, data);
+            player.on(AudioPlayerStatus.Idle, () => playNext(guildId));
+            player.on('error', (err) => {
+              console.error(err);
+              playNext(guildId);
+            });
+          }
 
-          player.on(AudioPlayerStatus.Idle, () => playNext(guildId));
-          player.on('error', (err) => {
-            console.error(err);
-            playNext(guildId);
-          });
+          data.queue.push(...songs);
+          if (!data.current) playNext(guildId);
+
+          interaction.editReply(`✅ Added **${songs.length}** track(s) to queue`);
         }
 
-        data.queue.push(...songs);
-        if (!data.current) playNext(guildId);
-
-        interaction.editReply(`✅ Added **${songs.length}** track(s) to queue`);
+      } catch (err) {
+        console.error(err);
+        interaction.editReply('❌ Error occurred');
       }
-
-    } catch (err) {
-      console.error(err);
-      interaction.editReply('❌ Error occurred');
     }
-  }
 
-  // ==========================
-  // /skip
-  // ==========================
-  if (interaction.commandName === 'skip') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing playing');
-    data.player.stop();
-    interaction.reply('⏭ Skipped');
-  }
+    // ==========================
+    // /skip
+    // ==========================
+    if (interaction.commandName === 'skip') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing playing');
+      data.player.stop();
+      interaction.reply('⏭ Skipped');
+    }
 
-  // ==========================
-  // /stop
-  // ==========================
-  if (interaction.commandName === 'stop') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing playing');
-    data.queue = [];
-    data.history = [];
-    data.player.stop();
-    data.connection.destroy();
-    queues.delete(guildId);
-    interaction.reply('🛑 Stopped');
-  }
+    // ==========================
+    // /stop
+    // ==========================
+    if (interaction.commandName === 'stop') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing playing');
+      data.queue = [];
+      data.history = [];
+      data.player.stop();
+      data.connection.destroy();
+      queues.delete(guildId);
+      interaction.reply('🛑 Stopped');
+    }
 
-  // ==========================
-  // /pause
-  // ==========================
-  if (interaction.commandName === 'pause') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing playing');
-    data.player.pause();
-    interaction.reply('⏸ Paused');
-  }
+    // ==========================
+    // /pause
+    // ==========================
+    if (interaction.commandName === 'pause') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing playing');
+      data.player.pause();
+      interaction.reply('⏸ Paused');
+    }
 
-  // ==========================
-  // /resume
-  // ==========================
-  if (interaction.commandName === 'resume') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing playing');
-    data.player.unpause();
-    interaction.reply('▶️ Resumed');
-  }
+    // ==========================
+    // /resume
+    // ==========================
+    if (interaction.commandName === 'resume') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing playing');
+      data.player.unpause();
+      interaction.reply('▶️ Resumed');
+    }
 
-  // ==========================
-  // /loop
-  // ==========================
-  if (interaction.commandName === 'loop') {
-    const data = queues.get(guildId);
-    if (!data) return interaction.reply('❌ Nothing playing');
-    data.loopMode = (data.loopMode + 1) % 3;
-    const modes = ['OFF', 'SONG', 'QUEUE'];
-    interaction.reply(`🔁 Loop: ${modes[data.loopMode]}`);
-  }
+    // ==========================
+    // /loop
+    // ==========================
+    if (interaction.commandName === 'loop') {
+      const data = queues.get(guildId);
+      if (!data) return interaction.reply('❌ Nothing playing');
+      data.loopMode = (data.loopMode + 1) % 3;
+      const modes = ['OFF', 'SONG', 'QUEUE'];
+      interaction.reply(`🔁 Loop: ${modes[data.loopMode]}`);
+    }
 
-  // ==========================
-  // /queue
-  // ==========================
-  if (interaction.commandName === 'queue') {
-    const data = queues.get(guildId);
-    if (!data || !data.queue.length) return interaction.reply('📭 Queue is empty');
-    const list = data.queue.slice(0, 10).map((s, i) => `${i + 1}. ${s.title}`).join('\n');
-    interaction.reply(`📜 **Queue:**\n${list}`);
-  }
-});
+    // ==========================
+    // /queue
+    // ==========================
+    if (interaction.commandName === 'queue') {
+      const data = queues.get(guildId);
+      if (!data || !data.queue.length) return interaction.reply('📭 Queue is empty');
+      const list = data.queue.slice(0, 10).map((s, i) => `${i + 1}. ${s.title}`).join('\n');
+      interaction.reply(`📜 **Queue:**\n${list}`);
+    }
 
-client.login(process.env.TOKEN);
-
-const http = require('http');
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('Bot is alive!');
-});
-server.listen(process.env.PORT || 3000, () => {
-  console.log('Keep-alive server running');
-});
-
-} catch (error) {
+  } catch (error) {
     console.error('Interaction error:', error);
     try {
       if (interaction.replied || interaction.deferred) {
@@ -604,6 +560,10 @@ server.listen(process.env.PORT || 3000, () => {
       } else {
         await interaction.reply({ content: '❌ Something went wrong!', ephemeral: true });
       }
-    } catch (e) { /* interaction expired, ignore */ }
+    } catch (e) {
+      // interaction expired, ignore silently
+    }
   }
 });
+
+client.login(process.env.TOKEN);
