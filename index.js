@@ -318,8 +318,10 @@ async function playNext(guildId) {
 // INTERACTIONS
 // ============================================================
 client.on('interactionCreate', async (interaction) => {
+  if (!interaction.guild) return;
   const guildId = interaction.guild.id;
 
+  try {
   // ==========================
   // BUTTONS
   // ==========================
@@ -592,4 +594,16 @@ const server = http.createServer((req, res) => {
 });
 server.listen(process.env.PORT || 3000, () => {
   console.log('Keep-alive server running');
+});
+
+} catch (error) {
+    console.error('Interaction error:', error);
+    try {
+      if (interaction.replied || interaction.deferred) {
+        await interaction.followUp({ content: '❌ Something went wrong!', ephemeral: true });
+      } else {
+        await interaction.reply({ content: '❌ Something went wrong!', ephemeral: true });
+      }
+    } catch (e) { /* interaction expired, ignore */ }
+  }
 });
