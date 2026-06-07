@@ -391,8 +391,10 @@ client.on('interactionCreate', async (interaction) => {
     // /play COMMAND
     // ==========================
     if (interaction.commandName === 'play') {
-      await interaction.deferReply();
-
+      console.log('[PLAY] Command received');
+      try { await interaction.deferReply(); } catch(e) { console.log('[PLAY] deferReply failed:', e.message); return; }
+      console.log('[PLAY] Deferred successfully');
+      
       const channel = interaction.member.voice.channel;
       if (!channel) return interaction.editReply('❌ Join a voice channel first');
 
@@ -423,16 +425,23 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
+        console.log('[PLAY] Searching for:', query);
         const search = spawn('./yt-dlp', [`ytsearch1:${query}`, '--dump-single-json']);
         let output = '';
+        let errorOutput = '';
         search.stdout.on('data', chunk => output += chunk);
-        search.on('close', () => {
+        search.stderr.on('data', chunk => { errorOutput += chunk; console.log('[yt-dlp stderr]', chunk.toString()); });
+        search.on('error', (err) => console.log('[yt-dlp spawn error]', err.message));
+        search.on('close', (code) => {
+          console.log('[PLAY] yt-dlp exited with code:', code, 'output length:', output.length);
           try {
             const json = JSON.parse(output);
+            console.log('[PLAY] Found song:', json.title);
             songs.push({ title: json.title, url: json.webpage_url });
             addToQueue();
           } catch (err) {
-            console.error(err);
+            console.error('[PLAY] JSON parse error:', err.message);
+            console.log('[PLAY] Raw output:', output.substring(0, 200));
             interaction.editReply('❌ Failed to find song');
           }
         });
