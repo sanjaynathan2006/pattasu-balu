@@ -132,7 +132,7 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
     console.log(`[AutoPlay] Trying YouTube Radio mix for ${videoId} (lang: ${language || 'any'})`);
 
     const result = await new Promise((resolve) => {
-      const proc = spawn('yt-dlp', [
+      const proc = spawn('./yt-dlp', [
         '--flat-playlist',
         '--dump-single-json',
         '--playlist-start', '2',
@@ -182,7 +182,7 @@ async function fetchRelatedSong(lastSong, playedUrls, language) {
   console.log(`[AutoPlay] Fallback search: "${searchQuery}"`);
 
   return new Promise((resolve) => {
-    const search = spawn('yt-dlp', [
+    const search = spawn('./yt-dlp', [
       `ytsearch25:${searchQuery}`,
       '--dump-single-json',
       '--flat-playlist'
@@ -259,7 +259,7 @@ async function playNext(guildId) {
   }
 
   try {
-    const process = spawn('yt-dlp', [
+    const process = spawn('./yt-dlp', [
       '-f', 'bestaudio',
       '-o', '-',
       '--quiet',
@@ -367,7 +367,7 @@ client.on('interactionCreate', async (interaction) => {
       }
 
       if (!selectedSong) {
-        const search = spawn('yt-dlp', [`ytsearch1:${input}`, '--dump-single-json']);
+        const search = spawn('./yt-dlp', [`ytsearch1:${input}`, '--dump-single-json']);
         let output = '';
         search.stdout.on('data', chunk => output += chunk);
         await new Promise(resolve => search.on('close', resolve));
@@ -403,7 +403,7 @@ client.on('interactionCreate', async (interaction) => {
         const isPlaylist = query.includes('list=');
 
         if (isPlaylist) {
-          const proc = spawn('yt-dlp', ['--flat-playlist', '--dump-single-json', query]);
+          const proc = spawn('./yt-dlp', ['--flat-playlist', '--dump-single-json', query]);
           let raw = '';
           proc.stdout.on('data', chunk => raw += chunk);
           proc.on('close', () => {
@@ -423,7 +423,7 @@ client.on('interactionCreate', async (interaction) => {
           return;
         }
 
-        const search = spawn('yt-dlp', [`ytsearch1:${query}`, '--dump-single-json']);
+        const search = spawn('./yt-dlp', [`ytsearch1:${query}`, '--dump-single-json']);
         let output = '';
         search.stdout.on('data', chunk => output += chunk);
         search.on('close', () => {
